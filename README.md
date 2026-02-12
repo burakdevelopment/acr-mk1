@@ -69,7 +69,7 @@ Left motors are parallel on one driver channel, right motors parallel on another
 ### MZ80 Obstacle Sensors (5x)
 The code currently uses **one** safety input:
 | Sensor | Raspberry Pi GPIO (BCM) | Notes |
-|---|---:|---|
+|---|---:|---| 
 | Front-center | `GPIO17` | Configured with internal pull-up. Sensor outputs LOW when obstacle detected (typical). |
 
 ✅ Your build has 5 sensors (2 left, 2 right, 1 front).  
