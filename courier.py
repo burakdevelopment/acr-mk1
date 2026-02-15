@@ -14,7 +14,7 @@ os.environ["SDL_VIDEODRIVER"] = "dummy"
 import pygame
 
 
-#Motorlar
+#Motors
 PWM1_PIN = 18
 DIR1_PIN = 23
 PWM2_PIN = 13
@@ -22,6 +22,9 @@ DIR2_PIN = 6
 
 #MZ80
 MZ80_PIN = 17
+
+#GPIO24
+GPS_GPIO24_PIN = 24  
 
 GPIO.setmode(GPIO.BCM)
 
@@ -32,47 +35,46 @@ GPIO.setup(DIR2_PIN, GPIO.OUT)
 
 GPIO.setup(MZ80_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
+GPIO.setup(GPS_GPIO24_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+
 pwm1 = GPIO.PWM(PWM1_PIN, 1000)
 pwm2 = GPIO.PWM(PWM2_PIN, 1000)
 
 pwm1.start(0)
 pwm2.start(0)
 
-current_velocity = 0.0  
-target_velocity = 0.0   
-gear_direction = 1      
-steering_angle = 0.0    
+current_velocity = 0.0
+target_velocity = 0.0
+gear_direction = 1
+steering_angle = 0.0
 
 
 def apply_motor_power():
     global current_velocity, gear_direction, steering_angle
 
-    
     base_speed = current_velocity
 
-    
-    if gear_direction == 1:  
+    if gear_direction == 1:
         GPIO.output(DIR1_PIN, GPIO.LOW)
         GPIO.output(DIR2_PIN, GPIO.LOW)
-    else:  
+    else:
         GPIO.output(DIR1_PIN, GPIO.HIGH)
         GPIO.output(DIR2_PIN, GPIO.HIGH)
 
-    
     speed_left = base_speed
     speed_right = base_speed
 
-    if steering_angle > 0:  
+    if steering_angle > 0:
         speed_right = base_speed * (1.0 - steering_angle)
-    elif steering_angle < 0:  
+    elif steering_angle < 0:
         speed_left = base_speed * (1.0 - abs(steering_angle))
 
-    
     speed_left = max(0, min(100, speed_left))
     speed_right = max(0, min(100, speed_right))
 
     pwm1.ChangeDutyCycle(speed_left)
     pwm2.ChangeDutyCycle(speed_right)
+
 
 camera = Picamera2()
 camera_config = camera.create_video_configuration(main={"size": (640, 480)})
@@ -86,28 +88,30 @@ def convert_to_degrees(raw_value):
     minutes = raw - (degrees * 100)
     return degrees + (minutes / 60.0)
 
-try:
-    ser = serial.Serial('/dev/serial0', 9600, timeout=1)
-    print("GPS bağlı (/dev/serial0).")
-except Exception as e:
-    ser = None
-    print("GPS bulunamadı veya meşgul:", e)
 
 current_lat = None
 current_lon = None
 
-
 gps_lock = threading.Lock()
 gps_detail = {
     "fix": False,
-    "fix_quality": None,
+    "fix_quality": None,     
+    "gsa_fix_type": None,    
+    "rmc_status": None,      
     "num_sats": None,
     "hdop": None,
+    "pdop": None,
+    "vdop": None,
     "alt_m": None,
     "speed_kmh": None,
     "course_deg": None,
     "last_update_ts": None,
+    "last_fix_ts": None,
     "raw_last_sentence": None,
+    "port": None,
+    "baud": None,
+    "nmea_seen": False,
+    "errors": 0,
 }
 
 def _safe_float(x):
@@ -120,38 +124,94 @@ def _safe_float(x):
 
 def _knots_to_kmh(kn):
     try:
-        if kn is None:
+        if kn is None or kn == "":
             return None
         return float(kn) * 1.852
     except Exception:
         return None
 
+def _now():
+    return time.time()
+
+def _set_fix_state():
+
+    global current_lat, current_lon
+    with gps_lock:
+        lat_ok = current_lat is not None and current_lon is not None
+        rmc_ok = (gps_detail.get("rmc_status") == "A")
+        gga_ok = (gps_detail.get("fix_quality") is not None and gps_detail.get("fix_quality") > 0)
+        gsa_ok = (gps_detail.get("gsa_fix_type") is not None and gps_detail.get("gsa_fix_type") >= 2)
+        fix_ok = lat_ok and (rmc_ok or gga_ok or gsa_ok)
+        gps_detail["fix"] = bool(fix_ok)
+        if fix_ok:
+            gps_detail["last_fix_ts"] = _now()
+
+def _open_serial_any():
+
+    ports = ["/dev/serial0", "/dev/ttyAMA0", "/dev/ttyS0"]
+    bauds = [9600, 38400, 57600, 115200]
+    for p in ports:
+        for b in bauds:
+            try:
+                s = serial.Serial(p, b, timeout=1)
+                
+                t0 = time.time()
+                saw_dollar = False
+                while time.time() - t0 < 1.2:
+                    line = s.readline().decode("ascii", errors="replace").strip()
+                    if line.startswith("$") and len(line) > 6:
+                        saw_dollar = True
+                        break
+                if saw_dollar:
+                    with gps_lock:
+                        gps_detail["port"] = p
+                        gps_detail["baud"] = b
+                        gps_detail["nmea_seen"] = True
+                    print(f"[GPS] NMEA bulundu: {p} @ {b}")
+                    return s
+                s.close()
+            except Exception:
+                continue
+    return None
+
+ser = _open_serial_any()
+if ser is None:
+    print("[GPS] Port/baud otomatik bulunamadı. UART/serial config kontrol et.")
+    with gps_lock:
+        gps_detail["errors"] += 1
+
 def gps_reader():
-    global current_lat, current_lon, gps_detail
+    global current_lat, current_lon, ser
+
     if ser is None:
-        return
+        
+        while True:
+            time.sleep(2.0)
+            s = _open_serial_any()
+            if s is not None:
+                ser = s
+                break
 
     while True:
         try:
-            line = ser.readline().decode('ascii', errors='replace').strip()
+            line = ser.readline().decode("ascii", errors="replace").strip()
             if not line:
-                time.sleep(0.05)
+                time.sleep(0.02)
                 continue
 
-            
-            if not (line.startswith("$GPGGA") or line.startswith("$GPRMC") or
-                    line.startswith("$GNGGA") or line.startswith("$GNRMC")):
+            if not line.startswith("$"):
                 continue
+
+            now_ts = _now()
+            with gps_lock:
+                gps_detail["raw_last_sentence"] = line
+                gps_detail["last_update_ts"] = now_ts
+                gps_detail["nmea_seen"] = True
 
             try:
                 msg = pynmea2.parse(line)
             except pynmea2.ParseError:
                 continue
-
-            now_ts = time.time()
-            with gps_lock:
-                gps_detail["raw_last_sentence"] = line
-                gps_detail["last_update_ts"] = now_ts
 
             
             if hasattr(msg, "lat") and hasattr(msg, "lon") and msg.lat and msg.lon:
@@ -168,34 +228,47 @@ def gps_reader():
                     pass
 
             
-            if msg.sentence_type == "GGA":
+            if getattr(msg, "sentence_type", None) == "GGA":
                 fq = _safe_float(getattr(msg, "gps_qual", None))
                 ns = _safe_float(getattr(msg, "num_sats", None))
                 hd = _safe_float(getattr(msg, "horizontal_dil", None))
                 alt = _safe_float(getattr(msg, "altitude", None))
-                fix_ok = False
-                try:
-                    
-                    fix_ok = fq is not None and fq > 0 and (current_lat is not None and current_lon is not None)
-                except Exception:
-                    fix_ok = False
-
                 with gps_lock:
                     gps_detail["fix_quality"] = fq
                     gps_detail["num_sats"] = ns
                     gps_detail["hdop"] = hd
                     gps_detail["alt_m"] = alt
-                    gps_detail["fix"] = bool(fix_ok)
+                _set_fix_state()
 
             
-            if msg.sentence_type == "RMC":
+            if getattr(msg, "sentence_type", None) == "RMC":
+                status = getattr(msg, "status", None)  # A or V
                 sp_kn = _safe_float(getattr(msg, "spd_over_grnd", None))
                 crs = _safe_float(getattr(msg, "true_course", None))
                 with gps_lock:
+                    gps_detail["rmc_status"] = status
                     gps_detail["speed_kmh"] = _knots_to_kmh(sp_kn)
                     gps_detail["course_deg"] = crs
+                _set_fix_state()
+
+            
+            if getattr(msg, "sentence_type", None) == "GSA":
+                fx = _safe_float(getattr(msg, "mode_fix_type", None))
+                pd = _safe_float(getattr(msg, "pdop", None))
+                hd = _safe_float(getattr(msg, "hdop", None))
+                vd = _safe_float(getattr(msg, "vdop", None))
+                with gps_lock:
+                    gps_detail["gsa_fix_type"] = fx
+                    gps_detail["pdop"] = pd
+                    
+                    if hd is not None:
+                        gps_detail["hdop"] = hd
+                    gps_detail["vdop"] = vd
+                _set_fix_state()
 
         except Exception:
+            with gps_lock:
+                gps_detail["errors"] += 1
             time.sleep(0.1)
 
 threading.Thread(target=gps_reader, daemon=True).start()
@@ -206,7 +279,7 @@ MAG_CAL_FILE = "/home/pi/mag_calibration.json"
 mag_lock = threading.Lock()
 mag_state = {
     "available": False,
-    "chip": None,              
+    "chip": None,
     "heading_deg": None,
     "raw": {"x": None, "y": None, "z": None},
     "calibrated": False,
@@ -226,7 +299,6 @@ mag_state = {
 DECLINATION_DEG = 0.0
 
 def load_mag_cal():
-    global mag_state
     try:
         if os.path.exists(MAG_CAL_FILE):
             with open(MAG_CAL_FILE, "r") as f:
@@ -250,7 +322,6 @@ def save_mag_cal(offset, scale):
         print("[MAG] Kalibrasyon kaydedilemedi:", e)
         return False
 
-
 try:
     try:
         from smbus2 import SMBus
@@ -269,7 +340,6 @@ def i2c_probe(addr):
         return True
     except Exception:
         return False
-
 
 HMC_ADDR = 0x1E
 HMC_REG_CONFIG_A = 0x00
@@ -315,14 +385,12 @@ def mag_apply_cal(x, y, z):
     with mag_lock:
         off = mag_state["cal"]["offset"]
         scl = mag_state["cal"]["scale"]
-    
     x = (x - float(off["x"])) * float(scl["x"])
     y = (y - float(off["y"])) * float(scl["y"])
     z = (z - float(off["z"])) * float(scl["z"])
     return x, y, z
 
 def mag_compute_heading_deg(x, y):
-    
     heading = math.degrees(math.atan2(y, x))
     heading += DECLINATION_DEG
     heading = (heading + 360.0) % 360.0
@@ -333,7 +401,6 @@ def mag_update_calibration_minmax(x, y, z):
         cal = mag_state["calibration"]
         if not cal["running"]:
             return
-        
         for axis, val in (("x", x), ("y", y), ("z", z)):
             if cal["min"][axis] is None or val < cal["min"][axis]:
                 cal["min"][axis] = val
@@ -342,7 +409,6 @@ def mag_update_calibration_minmax(x, y, z):
         cal["samples"] += 1
 
 def mag_finalize_calibration():
-    
     with mag_lock:
         cal = mag_state["calibration"]
         mn = cal["min"]
@@ -356,7 +422,7 @@ def mag_finalize_calibration():
             "y": (mx["y"] + mn["y"]) / 2.0,
             "z": (mx["z"] + mn["z"]) / 2.0,
         }
-        
+
         rx = (mx["x"] - mn["x"]) / 2.0
         ry = (mx["y"] - mn["y"]) / 2.0
         rz = (mx["z"] - mn["z"]) / 2.0
@@ -370,12 +436,9 @@ def mag_finalize_calibration():
             "z": avg / rz if rz != 0 else 1.0,
         }
 
-        
         mag_state["cal"]["offset"] = offset
         mag_state["cal"]["scale"] = scale
         mag_state["calibrated"] = True
-
-        
         mag_state["calibration"]["running"] = False
 
     ok = save_mag_cal(offset, scale)
@@ -384,11 +447,9 @@ def mag_finalize_calibration():
     return True, "Kalibrasyon tamamlandı ve kaydedildi."
 
 def mag_reader():
-    global mag_state
     if i2c_bus is None:
         return
 
-    
     chip = None
     try:
         if i2c_probe(QMC_ADDR):
@@ -422,10 +483,8 @@ def mag_reader():
             else:
                 x, y, z = hmc_read_raw()
 
-            
             mag_update_calibration_minmax(x, y, z)
 
-            
             with mag_lock:
                 calibrated = mag_state["calibrated"]
 
@@ -440,11 +499,12 @@ def mag_reader():
                 mag_state["raw"] = {"x": x, "y": y, "z": z}
                 mag_state["heading_deg"] = heading
 
-            time.sleep(0.05)  
+            time.sleep(0.05)
         except Exception:
             time.sleep(0.1)
 
 threading.Thread(target=mag_reader, daemon=True).start()
+
 
 
 app = Flask(__name__)
@@ -468,17 +528,16 @@ def camera_feed():
 def gps_api():
     return jsonify({"lat": current_lat, "lon": current_lon})
 
-
 @app.route("/api/gps_detail")
 def gps_detail_api():
     with gps_lock:
         d = dict(gps_detail)
-    return jsonify({
-        "lat": current_lat,
-        "lon": current_lon,
-        **d
-    })
+    return jsonify({"lat": current_lat, "lon": current_lon, **d})
 
+@app.route("/api/gps_gpio24")
+def gps_gpio24_api():
+    
+    return jsonify({"gpio24": int(GPIO.input(GPS_GPIO24_PIN))})
 
 @app.route("/api/compass")
 def compass_api():
@@ -493,7 +552,6 @@ def compass_api():
         }
     return jsonify(d)
 
-
 @app.route("/api/telemetry")
 def telemetry_api():
     with gps_lock:
@@ -506,17 +564,18 @@ def telemetry_api():
             "calibrated": mag_state["calibrated"],
             "calibration": mag_state["calibration"],
         }
+    gpio24 = int(GPIO.input(GPS_GPIO24_PIN))
     return jsonify({
         "gps": {"lat": current_lat, "lon": current_lon, **gd},
-        "compass": md
+        "compass": md,
+        "gpio24": gpio24
     })
-
 
 @app.route("/api/compass/calibration/start", methods=["POST"])
 def compass_cal_start():
     with mag_lock:
         if not mag_state["available"]:
-            return jsonify({"ok": False, "msg": "Manyetometre bulunamadı."}), 400
+            return jsonify({"ok": False, "msg": "Manyetometre bulunamadı (I2C adresi 0x0D/0x1E görünmüyor)."}), 400
         mag_state["calibration"] = {
             "running": True,
             "samples": 0,
@@ -524,7 +583,7 @@ def compass_cal_start():
             "max": {"x": None, "y": None, "z": None},
             "started_ts": time.time(),
         }
-    return jsonify({"ok": True, "msg": "Kalibrasyon başladı. Robotu açık alanda 30-60 sn '∞/figure-8' hareketiyle döndür."})
+    return jsonify({"ok": True, "msg": "Kalibrasyon başladı. 30-60 sn açık alanda robotu ‘∞/figure-8’ hareketiyle döndür."})
 
 @app.route("/api/compass/calibration/stop", methods=["POST"])
 def compass_cal_stop():
@@ -546,7 +605,7 @@ HTML_PAGE = """
         #cam { width: 100%; height: auto; display:block; }
         .info { padding: 10px; background: #333; }
         .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-        .card { background:#2b2b2b; padding:10px; border-radius:10px; min-width:220px; }
+        .card { background:#2b2b2b; padding:10px; border-radius:10px; min-width:240px; }
         .btn { background:#444; color:white; border:none; padding:10px 12px; border-radius:10px; cursor:pointer; }
         .btn:hover { background:#555; }
         .badge { display:inline-block; padding:4px 8px; border-radius:999px; background:#444; }
@@ -554,7 +613,8 @@ HTML_PAGE = """
         .warn { background:#7a5a11; }
         .bad  { background:#7a1f1f; }
         .small { font-size: 12px; opacity: 0.9; }
-        
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+
         .heading-icon {
             width: 0; height: 0;
             border-left: 10px solid transparent;
@@ -575,22 +635,23 @@ HTML_PAGE = """
     <div class="info">
         <div class="row">
             <div class="card">
-                <div><b>GPS Kurulum / Yönlendirme</b></div>
+                <div><b>GPS (NEO-M8N) Durum</b></div>
                 <div class="small">
-                    1) Açık alana çık (gökyüzü görünür olsun).<br>
-                    2) İlk fix için 30-120 sn bekle.<br>
-                    3) Uydu sayısı & HDOP iyileştikçe konum stabil olur.
+                    1) Açık alanda gökyüzü görsün.<br>
+                    2) İlk fix 30-180 sn sürebilir.<br>
+                    3) HDOP düştükçe konum stabil olur.
                 </div>
                 <div style="margin-top:8px">
                     <span id="gpsBadge" class="badge bad">GPS: NO FIX</span>
+                    <span id="uartBadge" class="badge warn">UART: ...</span>
                 </div>
+                <div class="small mono" style="margin-top:8px" id="nmeaLine">NMEA: -</div>
             </div>
 
             <div class="card">
                 <div><b>Pusula / Kalibrasyon</b></div>
                 <div class="small">
-                    İlk kullanımda kalibrasyon önerilir:<br>
-                    Açık alanda robotu 30-60 sn “∞/figure-8” şeklinde döndür.
+                    Açık alanda 30-60 sn “∞/figure-8” döndür.
                 </div>
                 <div style="margin-top:8px" class="row">
                     <button class="btn" onclick="startCal()">Kalibrasyonu Başlat</button>
@@ -605,6 +666,7 @@ HTML_PAGE = """
             <div class="card">
                 <div><b>Canlı Telemetri</b></div>
                 <div class="small" id="telemetryText">Yükleniyor...</div>
+                <div class="small mono" style="margin-top:6px">GPIO24: <span id="gpio24">-</span></div>
             </div>
         </div>
     </div>
@@ -613,11 +675,9 @@ HTML_PAGE = """
     <div id="map"></div>
 
     <script>
-        
         var map = L.map('map').setView([0, 0], 17);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 20 }).addTo(map);
 
-        
         var headingDiv = document.createElement("div");
         headingDiv.className = "heading-wrap";
         var arrow = document.createElement("div");
@@ -659,6 +719,17 @@ HTML_PAGE = """
             else badge(gpsB, "GPS: NO FIX", "bad");
 
             
+            var uartB = document.getElementById("uartBadge");
+            if (gps && gps.port && gps.baud) badge(uartB, "UART: " + gps.port + " @ " + gps.baud, "good");
+            else badge(uartB, "UART: searching...", "warn");
+
+            
+            document.getElementById("nmeaLine").textContent = "NMEA: " + (gps && gps.raw_last_sentence ? gps.raw_last_sentence : "-");
+
+            
+            document.getElementById("gpio24").textContent = (data.gpio24 ?? "-");
+
+            
             var magB = document.getElementById("magBadge");
             if (comp && comp.available) badge(magB, "PUSULA: " + (comp.chip || "OK"), "good");
             else badge(magB, "PUSULA: YOK", "bad");
@@ -675,13 +746,12 @@ HTML_PAGE = """
             var t = [];
             if (gps) {
                 t.push("Lat/Lon: " + (gps.lat ?? "-") + ", " + (gps.lon ?? "-"));
-                t.push("Sats: " + (gps.num_sats ?? "-") + " | HDOP: " + (gps.hdop ?? "-"));
+                t.push("Sats: " + (gps.num_sats ?? "-") + " | HDOP: " + (gps.hdop ?? "-") + " | PDOP: " + (gps.pdop ?? "-"));
+                t.push("FixQ(GGA): " + (gps.fix_quality ?? "-") + " | FixType(GSA): " + (gps.gsa_fix_type ?? "-") + " | RMC: " + (gps.rmc_status ?? "-"));
                 t.push("Alt: " + (gps.alt_m ?? "-") + " m | Speed: " + (gps.speed_kmh ? gps.speed_kmh.toFixed(1) : "-") + " km/h");
                 t.push("Course(GNSS): " + (gps.course_deg ?? "-") + "°");
             }
-            if (comp) {
-                t.push("Heading(MAG): " + (comp.heading_deg ? comp.heading_deg.toFixed(1) : "-") + "°");
-            }
+            if (comp) t.push("Heading(MAG): " + (comp.heading_deg ? comp.heading_deg.toFixed(1) : "-") + "°");
             document.getElementById("telemetryText").innerHTML = t.join("<br>");
         }
 
@@ -693,7 +763,6 @@ HTML_PAGE = """
 
             marker.setLatLng([lat, lon]);
 
-            
             var heading = null;
             if (comp && comp.heading_deg !== null && comp.heading_deg !== undefined) heading = comp.heading_deg;
             else if (gps.course_deg !== null && gps.course_deg !== undefined) heading = gps.course_deg;
@@ -705,7 +774,6 @@ HTML_PAGE = """
                 first = false;
             }
 
-            
             var now = Date.now();
             if (lastLat === null || lastLon === null) {
                 path.addLatLng([lat, lon]);
@@ -715,8 +783,8 @@ HTML_PAGE = """
 
             var dLat = (lat - lastLat);
             var dLon = (lon - lastLon);
-            var approx = Math.sqrt(dLat*dLat + dLon*dLon); 
-            if (approx > 0.00001 || (now - lastAddTs) > 1000) { 
+            var approx = Math.sqrt(dLat*dLat + dLon*dLon);
+            if (approx > 0.00001 || (now - lastAddTs) > 1000) {
                 path.addLatLng([lat, lon]);
                 lastLat = lat; lastLon = lon; lastAddTs = now;
             }
@@ -731,21 +799,21 @@ HTML_PAGE = """
             } catch(e) {}
         }
 
-        async function startCal() {
+        
+        async function postAndAlert(url) {
             try {
-                const res = await fetch('/api/compass/calibration/start', {method:'POST'});
-                const data = await res.json();
-                alert(data.msg || "OK");
-            } catch(e) { alert("Başlatma hatası"); }
+                const res = await fetch(url, {method:'POST'});
+                let data = null;
+                try { data = await res.json(); } catch(_) {}
+                const msg = (data && data.msg) ? data.msg : ("HTTP " + res.status);
+                alert(msg);
+            } catch(e) {
+                alert("İstek hatası: " + e);
+            }
         }
 
-        async function stopCal() {
-            try {
-                const res = await fetch('/api/compass/calibration/stop', {method:'POST'});
-                const data = await res.json();
-                alert(data.msg || "OK");
-            } catch(e) { alert("Durdurma hatası"); }
-        }
+        async function startCal() { await postAndAlert('/api/compass/calibration/start'); }
+        async function stopCal()  { await postAndAlert('/api/compass/calibration/stop'); }
 
         setInterval(fetchTelemetry, 500);
         fetchTelemetry();
@@ -765,7 +833,6 @@ def start_flask():
 def gamepad_physics_loop():
     global current_velocity, target_velocity, gear_direction, steering_angle
 
-    
     ACCELERATION_RATE = 2.0
     COASTING_RATE = 1.0
     BRAKING_RATE = 4.0
@@ -787,7 +854,6 @@ def gamepad_physics_loop():
 
     try:
         while True:
-            
             pygame.event.pump()
 
             throttle_input = 0.0
@@ -796,32 +862,27 @@ def gamepad_physics_loop():
             r1_pressed = 0
 
             if joystick:
-                
-                raw_r2 = joystick.get_axis(5)  
+                raw_r2 = joystick.get_axis(5)
                 throttle_input = (raw_r2 + 1) / 2.0
 
-                raw_l2 = joystick.get_axis(2)  
+                raw_l2 = joystick.get_axis(2)
                 brake_input = (raw_l2 + 1) / 2.0
 
-                steering_input = joystick.get_axis(0)  
-                r1_pressed = joystick.get_button(5)    
+                steering_input = joystick.get_axis(0)
+                r1_pressed = joystick.get_button(5)
 
-            
             if r1_pressed and not last_r1_state:
                 gear_direction *= -1
                 mode = "İLERİ" if gear_direction == 1 else "GERİ"
                 print(f"Vites: {mode}")
             last_r1_state = r1_pressed
 
-            
             obstacle_detected = (GPIO.input(MZ80_PIN) == 0)
 
-            
             if obstacle_detected and gear_direction == 1:
                 target_velocity = 0
-                current_velocity = 0  
+                current_velocity = 0
             else:
-                
                 target_velocity = throttle_input * MAX_SPEED
 
                 if brake_input > 0.1:
@@ -842,21 +903,19 @@ def gamepad_physics_loop():
 
             current_velocity = max(0.0, current_velocity)
 
-            
             if abs(steering_input) < 0.1:
                 steering_angle = 0.0
             else:
                 steering_angle = steering_input
 
-            
             apply_motor_power()
-
-            time.sleep(0.05)  
+            time.sleep(0.05)
 
     except KeyboardInterrupt:
         print("Çıkış yapılıyor...")
     except Exception as e:
         print(f"Hata oluştu: {e}")
+
 
 
 try:
