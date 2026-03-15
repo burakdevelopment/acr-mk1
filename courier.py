@@ -15,16 +15,20 @@ import pygame
 
 
 #Motors
-PWM1_PIN = 18
+PWM1_PIN = 18 #WHITE
 DIR1_PIN = 23
-PWM2_PIN = 13
+PWM2_PIN = 13 #WHITE
 DIR2_PIN = 6
 
-#MZ80
-MZ80_PIN = 17
+#mz80
+MZ80_FRONT_PIN = 17  
+
+MZ80_LEFT_FRONT_PIN  = 16
+MZ80_RIGHT_FRONT_PIN = 22
+MZ80_RIGHT_REAR_PIN  = 26
+MZ80_LEFT_REAR_PIN   = 5
 
 #GPIO24
-GPS_GPIO24_PIN = 24  
 
 GPIO.setmode(GPIO.BCM)
 
@@ -33,9 +37,11 @@ GPIO.setup(DIR1_PIN, GPIO.OUT)
 GPIO.setup(PWM2_PIN, GPIO.OUT)
 GPIO.setup(DIR2_PIN, GPIO.OUT)
 
-GPIO.setup(MZ80_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
-GPIO.setup(GPS_GPIO24_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(MZ80_FRONT_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(MZ80_LEFT_FRONT_PIN,  GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(MZ80_RIGHT_FRONT_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(MZ80_RIGHT_REAR_PIN,  GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(MZ80_LEFT_REAR_PIN,   GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
 pwm1 = GPIO.PWM(PWM1_PIN, 1000)
 pwm2 = GPIO.PWM(PWM2_PIN, 1000)
@@ -47,33 +53,6 @@ current_velocity = 0.0
 target_velocity = 0.0
 gear_direction = 1
 steering_angle = 0.0
-
-
-def apply_motor_power():
-    global current_velocity, gear_direction, steering_angle
-
-    base_speed = current_velocity
-
-    if gear_direction == 1:
-        GPIO.output(DIR1_PIN, GPIO.LOW)
-        GPIO.output(DIR2_PIN, GPIO.LOW)
-    else:
-        GPIO.output(DIR1_PIN, GPIO.HIGH)
-        GPIO.output(DIR2_PIN, GPIO.HIGH)
-
-    speed_left = base_speed
-    speed_right = base_speed
-
-    if steering_angle > 0:
-        speed_right = base_speed * (1.0 - steering_angle)
-    elif steering_angle < 0:
-        speed_left = base_speed * (1.0 - abs(steering_angle))
-
-    speed_left = max(0, min(100, speed_left))
-    speed_right = max(0, min(100, speed_right))
-
-    pwm1.ChangeDutyCycle(speed_left)
-    pwm2.ChangeDutyCycle(speed_right)
 
 
 camera = Picamera2()
@@ -95,9 +74,9 @@ current_lon = None
 gps_lock = threading.Lock()
 gps_detail = {
     "fix": False,
-    "fix_quality": None,     
-    "gsa_fix_type": None,    
-    "rmc_status": None,      
+    "fix_quality": None,
+    "gsa_fix_type": None,
+    "rmc_status": None,
     "num_sats": None,
     "hdop": None,
     "pdop": None,
@@ -154,7 +133,7 @@ def _open_serial_any():
         for b in bauds:
             try:
                 s = serial.Serial(p, b, timeout=1)
-                
+
                 t0 = time.time()
                 saw_dollar = False
                 while time.time() - t0 < 1.2:
@@ -184,7 +163,7 @@ def gps_reader():
     global current_lat, current_lon, ser
 
     if ser is None:
-        
+
         while True:
             time.sleep(2.0)
             s = _open_serial_any()
@@ -213,7 +192,7 @@ def gps_reader():
             except pynmea2.ParseError:
                 continue
 
-            
+
             if hasattr(msg, "lat") and hasattr(msg, "lon") and msg.lat and msg.lon:
                 try:
                     lat = convert_to_degrees(msg.lat)
@@ -227,7 +206,7 @@ def gps_reader():
                 except Exception:
                     pass
 
-            
+
             if getattr(msg, "sentence_type", None) == "GGA":
                 fq = _safe_float(getattr(msg, "gps_qual", None))
                 ns = _safe_float(getattr(msg, "num_sats", None))
@@ -240,7 +219,7 @@ def gps_reader():
                     gps_detail["alt_m"] = alt
                 _set_fix_state()
 
-            
+
             if getattr(msg, "sentence_type", None) == "RMC":
                 status = getattr(msg, "status", None)  # A or V
                 sp_kn = _safe_float(getattr(msg, "spd_over_grnd", None))
@@ -251,7 +230,7 @@ def gps_reader():
                     gps_detail["course_deg"] = crs
                 _set_fix_state()
 
-            
+
             if getattr(msg, "sentence_type", None) == "GSA":
                 fx = _safe_float(getattr(msg, "mode_fix_type", None))
                 pd = _safe_float(getattr(msg, "pdop", None))
@@ -260,7 +239,7 @@ def gps_reader():
                 with gps_lock:
                     gps_detail["gsa_fix_type"] = fx
                     gps_detail["pdop"] = pd
-                    
+
                     if hd is not None:
                         gps_detail["hdop"] = hd
                     gps_detail["vdop"] = vd
@@ -362,7 +341,7 @@ def hmc_read_raw():
     z = z - 65536 if z > 32767 else z
     return x, y, z
 
-QMC_ADDR = 0x0D
+QMC_ADDR = 0x0E
 QMC_REG_CONTROL = 0x09
 QMC_REG_SETRESET = 0x0B
 QMC_REG_DATA = 0x00
@@ -534,11 +513,6 @@ def gps_detail_api():
         d = dict(gps_detail)
     return jsonify({"lat": current_lat, "lon": current_lon, **d})
 
-@app.route("/api/gps_gpio24")
-def gps_gpio24_api():
-    
-    return jsonify({"gpio24": int(GPIO.input(GPS_GPIO24_PIN))})
-
 @app.route("/api/compass")
 def compass_api():
     with mag_lock:
@@ -564,12 +538,11 @@ def telemetry_api():
             "calibrated": mag_state["calibrated"],
             "calibration": mag_state["calibration"],
         }
-    gpio24 = int(GPIO.input(GPS_GPIO24_PIN))
     return jsonify({
         "gps": {"lat": current_lat, "lon": current_lon, **gd},
-        "compass": md,
-        "gpio24": gpio24
+        "compass": md
     })
+
 
 @app.route("/api/compass/calibration/start", methods=["POST"])
 def compass_cal_start():
@@ -713,28 +686,28 @@ HTML_PAGE = """
             var gps = data.gps;
             var comp = data.compass;
 
-            
+
             var gpsB = document.getElementById("gpsBadge");
             if (gps && gps.fix) badge(gpsB, "GPS: FIX", "good");
             else badge(gpsB, "GPS: NO FIX", "bad");
 
-            
+
             var uartB = document.getElementById("uartBadge");
             if (gps && gps.port && gps.baud) badge(uartB, "UART: " + gps.port + " @ " + gps.baud, "good");
             else badge(uartB, "UART: searching...", "warn");
 
-            
+
             document.getElementById("nmeaLine").textContent = "NMEA: " + (gps && gps.raw_last_sentence ? gps.raw_last_sentence : "-");
 
-            
+
             document.getElementById("gpio24").textContent = (data.gpio24 ?? "-");
 
-            
+
             var magB = document.getElementById("magBadge");
             if (comp && comp.available) badge(magB, "PUSULA: " + (comp.chip || "OK"), "good");
             else badge(magB, "PUSULA: YOK", "bad");
 
-            
+
             var calB = document.getElementById("calBadge");
             if (comp && comp.calibration && comp.calibration.running) {
                 badge(calB, "CAL: RUNNING (" + comp.calibration.samples + ")", "warn");
@@ -742,7 +715,7 @@ HTML_PAGE = """
                 badge(calB, "CAL: " + ((comp && comp.calibrated) ? "OK" : "NOT CAL"), (comp && comp.calibrated) ? "good" : "warn");
             }
 
-            
+
             var t = [];
             if (gps) {
                 t.push("Lat/Lon: " + (gps.lat ?? "-") + ", " + (gps.lon ?? "-"));
@@ -799,7 +772,7 @@ HTML_PAGE = """
             } catch(e) {}
         }
 
-        
+
         async function postAndAlert(url) {
             try {
                 const res = await fetch(url, {method:'POST'});
@@ -830,13 +803,43 @@ def start_flask():
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
 
 
+def apply_motor_power():
+    global current_velocity, gear_direction, steering_angle, obstacle_detected
+
+    base_speed = current_velocity
+
+    if gear_direction == 1 and obstacle_detected:
+        GPIO.output(DIR1_PIN, GPIO.LOW)
+        GPIO.output(DIR2_PIN, GPIO.LOW)
+        base_speed = 0
+    else:
+        GPIO.output(DIR1_PIN, GPIO.HIGH)
+        GPIO.output(DIR2_PIN, GPIO.HIGH)
+
+    speed_left = base_speed
+    speed_right = base_speed
+
+    if steering_angle > 0:
+        speed_right = base_speed * (1.0 - steering_angle)
+    elif steering_angle < 0:
+        speed_left = base_speed * (1.0 - abs(steering_angle))
+
+    speed_left = max(0, min(100, speed_left))
+    speed_right = max(0, min(100, speed_right))
+
+    pwm1.ChangeDutyCycle(speed_left)
+    pwm2.ChangeDutyCycle(speed_right)
+
+
+obstacle_detected = False 
+
 def gamepad_physics_loop():
-    global current_velocity, target_velocity, gear_direction, steering_angle
+    global current_velocity, target_velocity, gear_direction, steering_angle, obstacle_detected
 
     ACCELERATION_RATE = 2.0
     COASTING_RATE = 1.0
     BRAKING_RATE = 4.0
-    MAX_SPEED = 100.0
+    MAX_SPEED = 100.0    
 
     pygame.init()
     pygame.joystick.init()
@@ -847,14 +850,28 @@ def gamepad_physics_loop():
         joystick.init()
         print(f"\n[INFO] Gamepad: {joystick.get_name()}")
     else:
-        print("\n[UYARI] Gamepad yok! Sistem bekliyor...")
+        print("\n[UYARI] Gamepad bulunamadı! Bağlantıyı kontrol edin.")
 
     last_r1_state = 0
-    print("Sistem Hazır. MZ80 Engel Koruması Aktif.")
+    print("Sistem Hazır. MZ80 Döngüsel Engel Koruması Aktif.")
 
     try:
         while True:
             pygame.event.pump()
+            
+            front_obstacle      = (GPIO.input(MZ80_FRONT_PIN) == 0)
+            left_front_obstacle = (GPIO.input(MZ80_LEFT_FRONT_PIN) == 0)
+            right_front_obstacle = (GPIO.input(MZ80_RIGHT_FRONT_PIN) == 0)
+            right_rear_obstacle  = (GPIO.input(MZ80_RIGHT_REAR_PIN) == 0)
+            left_rear_obstacle   = (GPIO.input(MZ80_LEFT_REAR_PIN) == 0)
+
+            obstacle_detected = (
+                front_obstacle or
+                left_front_obstacle or
+                right_front_obstacle or
+                right_rear_obstacle or
+                left_rear_obstacle
+            )
 
             throttle_input = 0.0
             brake_input = 0.0
@@ -862,6 +879,7 @@ def gamepad_physics_loop():
             r1_pressed = 0
 
             if joystick:
+                # Eksen
                 raw_r2 = joystick.get_axis(5)
                 throttle_input = (raw_r2 + 1) / 2.0
 
@@ -871,52 +889,49 @@ def gamepad_physics_loop():
                 steering_input = joystick.get_axis(0)
                 r1_pressed = joystick.get_button(5)
 
+            # Vites
             if r1_pressed and not last_r1_state:
                 gear_direction *= -1
                 mode = "İLERİ" if gear_direction == 1 else "GERİ"
                 print(f"Vites: {mode}")
             last_r1_state = r1_pressed
 
-            obstacle_detected = (GPIO.input(MZ80_PIN) == 0)
-
-            if obstacle_detected and gear_direction == 1:
+           
+            if gear_direction == 1 and obstacle_detected:
+                
                 target_velocity = 0
                 current_velocity = 0
             else:
                 target_velocity = throttle_input * MAX_SPEED
 
                 if brake_input > 0.1:
+                    # Frenleme
                     drop_amount = BRAKING_RATE * (0.5 + brake_input)
-                    if current_velocity > 0:
-                        current_velocity -= drop_amount
-                    if current_velocity < 0:
-                        current_velocity = 0
+                    current_velocity = max(0, current_velocity - drop_amount)
                 else:
+                    # Yumuşak Hızlanma/Yavaşlama
                     if current_velocity < target_velocity:
-                        current_velocity += ACCELERATION_RATE
-                        if current_velocity > target_velocity:
-                            current_velocity = target_velocity
+                        current_velocity = min(target_velocity, current_velocity + ACCELERATION_RATE)
                     elif current_velocity > target_velocity:
-                        current_velocity -= COASTING_RATE
-                        if current_velocity < target_velocity:
-                            current_velocity = target_velocity
+                        current_velocity = max(target_velocity, current_velocity - COASTING_RATE)
 
             current_velocity = max(0.0, current_velocity)
 
+            # Direksiyon Açısı Hesabı
             if abs(steering_input) < 0.1:
                 steering_angle = 0.0
             else:
                 steering_angle = steering_input
 
+            # Motorlara gücü uygula
             apply_motor_power()
+            
             time.sleep(0.05)
 
     except KeyboardInterrupt:
         print("Çıkış yapılıyor...")
     except Exception as e:
-        print(f"Hata oluştu: {e}")
-
-
+        print(f"Fizik döngüsünde hata: {e}")
 
 try:
     threading.Thread(target=start_flask, daemon=True).start()
