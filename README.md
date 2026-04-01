@@ -62,7 +62,7 @@
 
 **1. Clone the repository**
 ```bash
-git clone [https://github.com/burakdevelopment/acr-mk1.git](https://github.com/yourusername/acr-mk1.git)
+git clone [https://github.com/burakdevelopment/acr-mk1.git]
 cd acr-mk1
 ```
 
