@@ -1,324 +1,140 @@
-# ACR-MK1 — Autonomous Courier Robot (Raspberry Pi 4 + Pi Camera v3 + M8N GPS/Compass)
+# ACR-MK1 (Autonomous Courier Robot) 🤖📍
 
+![Python](https://img.shields.io/badge/Python-3.x-blue.svg)
+![Raspberry Pi](https://img.shields.io/badge/Platform-Raspberry%20Pi-C51A4A.svg)
+![Flask](https://img.shields.io/badge/Framework-Flask-black.svg)
 
-**ACR-MK1** (*Autonomous Courier Robot*) is a compact courier robot platform built around **Raspberry Pi 4 (8GB)** and **Raspberry Pi Camera Module v3**, designed to operate anywhere with cellular coverage (via USB 4G modem) and provide a solid, production-style base for full autonomy.
-
-This repository focuses on a **robust robotics backbone**:
-- **Live camera streaming (MJPEG)**
-- **Live GPS tracking on a web map (Leaflet + OSM)**
-- **Magnetometer compass heading + web-based calibration flow**
-- **Manual driving via gamepad**
-- **Obstacle safety stop via MZ80 IR sensors (5x)**
-- Clean structure that allows adding autonomy modules (perception → planning → control) without breaking the base stack.
+**ACR-MK1** (Autonomous Courier Robot - Mark 1) is a fully-featured, Raspberry Pi-based teleoperated and semi-autonomous robot. It features a rich web-based dashboard for real-time telemetry (GPS tracking, compass heading, camera feed) alongside a terminal-based WASD control interface. It includes built-in obstacle avoidance and dynamic physics for smooth acceleration and steering.
 
 ---
 
-## Hardware Overview (Current Build)
+## 🚀 Key Features
 
-### Robot Preview Images
-
-<img width="3024" height="4032" alt="Untitled2(1)" src="https://github.com/user-attachments/assets/f8b73add-6a07-475c-963b-03e02f71a18d" />
-
-<img width="2160" height="3840" alt="2" src="https://github.com/user-attachments/assets/99524712-75c9-4d5f-af1f-0a78309d3394" />
-
-
-### Core Compute
-- **Raspberry Pi 4 Model B — 8GB RAM**
-- **Raspberry Pi OS** (Bookworm/Bullseye compatible)
-- **Raspberry Pi Camera Module v3**
-
-### Navigation Sensor Module
-- **u-blox NEO-M8N GNSS module** (GPS/GLONASS/etc.)
-- **Magnetometer (Compass)** on the same module (commonly **QMC5883L** or **HMC5883L**)
-
-### Obstacle Safety
-- **MZ80 IR obstacle sensors (5 units)**
-  - 1x front-center
-  - 2x left side
-  - 2x right side
-
-### Drive System
-- 4x DC motors (4-wheel drive)
-- Motor driver(s) compatible with PWM + direction pins (H-bridge style)
-- **Two PWM channels** used because left motors are wired in parallel and right motors are wired in parallel (differential steering)
-
-### Battery
-- **10A LiPo** (ensure the pack’s **C-rating** and capacity match your current draw — see Power section)
-
-### Optional Connectivity
-- USB **4G/LTE modem** (SIM dongle) for remote monitoring/control anywhere with base station coverage
+* **Real-Time Web Dashboard:** Built with Flask, serving a live dashboard at port `5000`.
+* **Live Camera Stream:** Low-latency video streaming using `Picamera2` and OpenCV.
+* **Live GPS Mapping:** Integration with Leaflet.js to plot the robot's coordinates on a map in real-time. Parses NMEA sentences via UART.
+* **Advanced Telemetry:** Auto-detects and reads from multiple I2C magnetometers (HMC5883L, QMC5883L, IST8310) to calculate precise headings. Features a web-triggered calibration sequence.
+* **Smart Obstacle Avoidance:** Integrates with 5 MZ80 infrared sensors (Front, Left-Front, Right-Front, Left-Rear, Right-Rear). Automatically cuts forward throttle if an obstacle is detected.
+* **Smooth WASD Teleoperation:** Terminal-based control over SSH utilizing a custom physics model (acceleration, coasting, and braking rates) for natural movement.
 
 ---
 
-## Wiring / Pinout
+## 🛠 Hardware Requirements
 
-> GPIO numbering below uses **BCM** (not physical pin numbers).
-
-### Motor Driver (Differential — Left/Right)
-| Function | Raspberry Pi GPIO (BCM) | Notes |
-|---|---:|---|
-| PWM Left | `GPIO18` | PWM signal to left motor driver input |
-| DIR Left | `GPIO23` | Direction pin (HIGH/LOW depends on driver wiring) |
-| PWM Right | `GPIO13` | PWM signal to right motor driver input |
-| DIR Right | `GPIO6`  | Direction pin |
-
-**Why 2 PWM?**  
-Left motors are parallel on one driver channel, right motors parallel on another. Steering is achieved by reducing PWM on one side (differential).
+* **SBC:** Raspberry Pi (3, 4, or 5 recommended) running Raspberry Pi OS (Bullseye or newer for Picamera2 support).
+* **Motors:** 2x DC Motors with a Motor Driver (e.g., L298N).
+* **Sensors:**
+  * 5x MZ80 Infrared Obstacle Avoidance Sensors.
+  * 1x GPS Module (UART interface).
+  * 1x I2C Magnetometer/Compass (HMC5883L, QMC5883L, or IST8310).
+* **Camera:** Raspberry Pi Camera Module.
 
 ---
 
-### MZ80 Obstacle Sensors (5x)
-The code currently uses **one** safety input:
-| Sensor | Raspberry Pi GPIO (BCM) | Notes |
-|---|---:|---| 
-| Front-center | `GPIO17` | Configured with internal pull-up. Sensor outputs LOW when obstacle detected (typical). |
+## 🔌 Pin Configuration (BCM)
 
-✅ Your build has 5 sensors (2 left, 2 right, 1 front).  
-This repo’s next step is to map all 5 into:
-- Front: hard stop
-- Sides: soft correction / wall-follow / slow-down
+### Motor Driver
+| Component | RPi GPIO (BCM) | Description |
+| :--- | :--- | :--- |
+| **PWM1** | `GPIO 18` | Left Motor Speed (PWM) |
+| **DIR1** | `GPIO 23` | Left Motor Direction |
+| **PWM2** | `GPIO 13` | Right Motor Speed (PWM) |
+| **DIR2** | `GPIO 6` | Right Motor Direction |
 
-(Implementation is designed to be added without breaking the current backbone.)
+### MZ80 Obstacle Sensors
+*Sensors use internal Pull-Up resistors (`PUD_UP`). Logic LOW (`0`) triggers the obstacle flag.*
 
----
+| Sensor Position | RPi GPIO (BCM) |
+| :--- | :--- |
+| **Front** | `GPIO 17` |
+| **Left Front** | `GPIO 16` |
+| **Right Front** | `GPIO 22` |
+| **Left Rear** | `GPIO 5` |
+| **Right Rear** | `GPIO 26` |
 
-### M8N GNSS + Magnetometer Module (as you wired)
-You connected:
-- **VCC → +5V**
-- **GND → GND**
-- **SDA → GPIO2 (I2C SDA)**
-- **SCL → GPIO3 (I2C SCL)**
-- **TXD → GPIO15 (RXD0)** *(Pi receives GNSS data)*
-- **RXD → GPIO14 (TXD0)** *(Pi transmits to GNSS if needed)*
-
-#### GNSS (UART)
-| GNSS | Raspberry Pi |
-|---|---|
-| GNSS TX | Pi `GPIO15` (RXD0) |
-| GNSS RX | Pi `GPIO14` (TXD0) |
-
-#### Magnetometer (I2C)
-| Magnetometer | Raspberry Pi |
-|---|---|
-| SDA | `GPIO2` |
-| SCL | `GPIO3` |
+### I2C & UART Connections
+* **GPS:** Connect to RPi Serial TX/RX (`/dev/serial0`, `/dev/ttyAMA0`, or `/dev/ttyS0`).
+* **Compass:** Connect to RPi I2C pins (SDA1, SCL1).
 
 ---
 
-## Power Architecture (Recommended)
+## 📦 Installation & Setup
 
-### Battery (10A LiPo)
-A “10A LiPo” description is often ambiguous. What matters:
-- **Voltage** (e.g., 2S = 7.4V, 3S = 11.1V)
-- **Capacity** (mAh)
-- **C-rating** (current capability = Capacity(Ah) × C)
+**1. Clone the repository**
+```bash
+git clone [https://github.com/burakdevelopment/acr-mk1.git](https://github.com/yourusername/acr-mk1.git)
+cd acr-mk1
+```
 
-**Raspberry Pi 4 needs stable 5V** and is sensitive to brownouts.
-
-### Recommended Layout
-- **LiPo → DC-DC Buck Converter (5V, 5A+ recommended)** → Raspberry Pi 4
-- **LiPo → Motor Driver (direct)** (depending on driver voltage range)
-- Tie all grounds together:
-  - Battery GND = Pi GND = Motor driver GND = sensor GND
-
-> Do NOT power motors through the Pi.  
-> Always use a dedicated buck converter for Pi 5V rail.
-
----
-
-## Software Architecture
-
-### What the code provides (Backbone)
-- **Flask web server** with:
-  - `/` dashboard: map + camera stream + sensor status
-  - `/camera`: MJPEG stream
-  - `/api/gps`: basic lat/lon (legacy endpoint kept for compatibility)
-  - `/api/gps_detail`: fix quality, satellites, HDOP, altitude, speed/course (if available)
-  - `/api/compass`: heading + calibration status
-  - `/api/telemetry`: combined GPS + compass
-  - `/api/compass/calibration/start`: begin calibration sampling
-  - `/api/compass/calibration/stop`: compute + save offsets/scales
-- **GPS reader thread**
-  - Reads NMEA via `/dev/serial0`
-  - Parses GGA/RMC
-- **Magnetometer reader thread**
-  - Auto-detects **QMC5883L (0x0D)** or **HMC5883L (0x1E)**
-  - Provides heading, supports calibration
-- **Gamepad driving loop**
-  - Differential control (2 PWM)
-  - Safety stop using MZ80 (front)
-
----
-
-## Installation (Raspberry Pi OS)
-
-### 1) Enable Interfaces
-- Run:
+**2. Enable Hardware Interfaces**
+Ensure Camera, I2C, and Serial are enabled on your Raspberry Pi:
 ```bash
 sudo raspi-config
 ```
-- Enable:
+* Navigate to `Interface Options`.
+* Enable **I2C**.
+* Enable **Serial Port** (Disable serial login shell, but enable hardware serial).
+* Enable **Camera** (Legacy or libcamera depending on your OS).
 
-* I2C
-* Serial / UART
-* Disable login shell over serial
-* Enable hardware serial port
-
-- Reboot:
+**3. Install System Dependencies**
 ```bash
-sudo reboot
+sudo apt-get update
+sudo apt-get install python3-opencv python3-smbus i2c-tools
 ```
 
-## 2) System Packages
+**4. Install Python Dependencies**
+```bash
+pip3 install Flask RPi.GPIO pyserial pynmea2 smbus2
+```
+*(Note: `picamera2` is usually pre-installed on modern Raspberry Pi OS releases. If not, refer to official PiCamera2 documentation).*
+
+---
+
+## 🎮 Usage
+
+Run the script from your terminal (preferably over SSH). **You must run this with `sudo` privileges to access GPIO pins.**
 
 ```bash
-sudo apt update
-sudo apt install -y \
-  python3-pip python3-venv \
-  python3-opencv \
-  python3-serial \
-  i2c-tools \
-  python3-smbus \
-  libatlas-base-dev
+sudo python3 courierv2.py
 ```
 
-**!!! If python3-smbus is not enough on your OS image, use smbus2 via pip.**
-
-## 3) Python Dependencies
-
-- Create venv and install:
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install flask pynmea2 pygame smbus2
+### 1. Web Dashboard
+Once the script is running, open a web browser on any device connected to the same network and navigate to:
+```text
+http://<RASPBERRY_PI_IP>:5000
 ```
+Here you can view the live camera feed, track the ACR-MK1 on the GPS map, monitor telemetry, and calibrate the compass.
 
-## 4) Verify Hardware
+### 2. WASD Terminal Controls
+The robot is controlled directly from the terminal session where you executed the script. The controls use non-blocking inputs.
 
-- Check I2C devices:
-```bash
-i2cdetect -y 1
+| Key | Action |
+| :---: | :--- |
+| **W** | Accelerate / Throttle |
+| **S** | Brake / Decelerate |
+| **A** | Steer Left |
+| **D** | Steer Right |
+| **R** | Toggle Gear (Forward / Reverse) |
+| **SPACE** | Emergency Stop (Sets velocity to 0) |
+| **Q** / **Ctrl+C** | Quit application safely |
+
+---
+
+## 📡 REST API Endpoints
+
+The Flask server exposes several JSON endpoints for fetching telemetry externally:
+
+* `GET /api/gps` - Returns current Latitude and Longitude.
+* `GET /api/gps_detail` - Returns verbose GPS data (Sats, HDOP, Alt, Speed).
+* `GET /api/compass` - Returns magnetometer data and heading.
+* `GET /api/telemetry` - Combined payload of GPS and Compass data.
+* `POST /api/compass/calibration/start` - Initiates compass calibration.
+* `POST /api/compass/calibration/stop` - Ends calibration and saves offsets to `/home/pi/mag_calibration.json`.
+
+---
+
+## ⚠️ Safety Notes
+* Ensure the robot is elevated (wheels off the ground) during initial testing to prevent unexpected runaways.
+* Obstacle detection automatically cuts the forward throttle. Reversing is still permitted to back away from the obstacle.
+* The script safely cleans up GPIO pins and stops PWM signals upon exit (`Ctrl+C`).
 ```
-
-- You should see one of:
-
-* 0x0D → QMC5883L
-* 0x1E → HMC5883L
-
-- Check GNSS UART stream:
-```bash
-sudo cat /dev/serial0
-```
-- You should see $GNGGA, $GNRMC, etc.
-
-### Run
-
-- Activate venv and start:
-```bash
-source .venv/bin/activate
-python3 courier.py
-```
-
-- Open dashboard:
-```bash
-http://<raspberrypi-ip>:5000
-```
-- Endpoints:
-
-Camera stream: http://<raspberrypi-ip>:5000/camera
-Telemetry JSON: http://<raspberrypi-ip>:5000/api/telemetry
-
-
-## GPS Usage Notes (Best Fix)
-
-- To get stable GNSS:
-
-* Go outdoors (open sky, minimal walls/metal)
-* Wait for first fix (30–120 seconds typical)
-
-- Aim for:
-
-* Satellites: 8+ (more is better)
-* HDOP: lower is better (e.g., < 1.5 good, < 1.0 great)
-
-## Compass Calibration (Web UI)
-
-- The dashboard provides:
-
-* Start Calibration
-* Stop & Save
-
-- How to calibrate:
-
-* Go outdoors (avoid large metal surfaces)
-* Press Start Calibration
-* Move the robot in a figure-8 (∞) motion for 30–60 seconds
-* Press Stop & Save
-
-- Calibration is stored locally:
-
-* /home/pi/mag_calibration.json
-
-**Note: This is a practical hard-iron + simple soft-iron correction.**
-
-Tilt compensation requires an IMU and is not included in this build.
-
-## Cellular Connectivity (USB 4G Modem)
-
-- empty for now :)
-
-## Safety (Read This)
-
-* This robot drives real motors and can cause injury or damage.
-* Always test at low speed in a controlled area.
-* Use a physical kill switch.
-* IR sensors can fail on black/reflective surfaces and under sunlight do not rely on them as the only safety layer.
-* Raspberry Pi brownouts can cause unpredictable behavior ensure stable power.
-
-
-### Roadmap to Full Autonomy (Next Milestones)
-
-## Phase 1 — Reliable Backbone (this repo)
-
-- ✅ Camera stream
-- ✅ GNSS + compass telemetry
-- ✅ Web map tracking + calibration flow
-- ✅ Manual control + emergency stop
-
-## Phase 2 — Perception (Pi 4 CPU optimized)
-
-* Lightweight segmentation (drivable area / corridor / sidewalk)
-* Export to TFLite INT8
-* Run 8–15 FPS at low resolution
-
-## Phase 3 — Planning & Control
-
-- State machine:
-
-* Manual / Auto / Emergency
-* Visual lane/corridor centering controller
-* GPS as “goal proximity” (single waypoint)
-
-## Phase 4 — Robustness Upgrade (Recommended Hardware)
-
-- To approach “street-level autonomy” safely:
-
-* Wheel encoders (odometry)
-* IMU (heading/tilt, sensor fusion)
-* ToF/LiDAR (reliable obstacle distance)
-* RTK GNSS (if you need accurate outdoor navigation)
-
-## Repository Structure (Suggested)
-```bash
-.
-├── courier.py
-├── README.md
-└── assets/
-    ├── wiring/
-    └── screenshots/
-```
-
-## License
-
-MIT
