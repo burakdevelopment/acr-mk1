@@ -138,3 +138,15 @@ The Flask server exposes several JSON endpoints for fetching telemetry externall
 * Obstacle detection automatically cuts the forward throttle. Reversing is still permitted to back away from the obstacle.
 * The script safely cleans up GPIO pins and stops PWM signals upon exit (`Ctrl+C`).
 ```
+
+
+---
+
+## 👥 Contributors
+
+| Name | GitHub |
+| :--- | :--- |
+| burakdevelopment | [@burakdevelopment](https://github.com/burakdevelopment) |
+| AtnNaz | [@AtnNaz](https://github.com/AtnNaz) |
+| OwXMaybe | [@OwXMaybe](https://github.com/OwXMaybe) |
+| SudoMrSpear | [@SudoMrSpear](https://github.com/SudoMrSpear) |
